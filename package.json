@@ -22,7 +22,7 @@
     "@cacheable/node-cache": "^1.7.1",
     "@discordjs/collection": "^2.1.1",
     "@mengkodingan/consolefy": "^1.0.1",
-    "baileys": "npm:@yupra/baileys@^2.0.2",
+    "baileys": "github:Itsukichann/Baileys",
     "glob": "^11.0.3",
     "pino": "^9.10.0",
     "vcard-parser": "^1.0.0"

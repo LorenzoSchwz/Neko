@@ -32,7 +32,6 @@ class Client {
         this.markOnlineOnConnect = opts.markOnlineOnConnect ?? true;
         this.prefix = opts.prefix;
         this.selfReply = opts.selfReply ?? false;
-        this.autoMention = opts.autoMention ?? false;
         this.autoAiLabel = opts.autoAiLabel ?? false;
 
         this.fallbackWAVersion = [2, 3000, 1021387508];
@@ -52,13 +51,46 @@ class Client {
             stdTTL: 30,
             useClones: false
         });
-        this.jidsPath = `${this.authDir}/jids.json`;
-        this.jids = {};
+        this.pushnamesPath = `${this.authDir}/pushnames.json`;
+        this.pushNames = {};
 
         if (typeof this.prefix === "string") this.prefix = this.prefix.split("");
     }
 
-    onConnectionUpdate() {
+    savePushnames() {
+        fs.writeFileSync(this.pushnamesPath, JSON.stringify(this.pushNames));
+    }
+
+    async runMiddlewares(ctx, index = 0) {
+        const middlewareFn = this.middlewares.get(index);
+        if (!middlewareFn) return true;
+
+        let nextCalled = false;
+        let middlewareCompleted = false;
+
+        await middlewareFn(ctx, async () => {
+            if (nextCalled) throw new Error("next() called multiple times in middleware");
+            nextCalled = true;
+            middlewareCompleted = await this.runMiddlewares(ctx, index + 1);
+        });
+
+        if (!nextCalled && !middlewareCompleted) return false;
+
+        return middlewareCompleted;
+    }
+
+    use(fn) {
+        this.middlewares.set(this.middlewares.size, fn);
+    }
+
+    async setGroupCache(id) {
+        if (!this.groupCache.get(id)) {
+            const metadata = await this.core.groupMetadata(id);
+            this.groupCache.set(id, metadata);
+        }
+    }
+
+    onEvents() {
         this.core.ev.on("connection.update", (update) => {
             this.ev.emit(Events.ConnectionUpdate, update);
             const {
@@ -77,78 +109,34 @@ class Client {
                 this.ev.emit(Events.ClientReady, this.core);
             }
         });
-    }
 
-    onCredsUpdate() {
         this.core.ev.on("creds.update", this.saveCreds);
-    }
 
-    saveJids() {
-        fs.writeFileSync(this.jidsPath, JSON.stringify(this.jids));
-    }
-
-    async runMiddlewares(ctx, index = 0) {
-        const middlewareFn = this.middlewares.get(index);
-        if (!middlewareFn) {
-            return true;
-        }
-
-        let nextCalled = false;
-        let middlewareCompleted = false;
-        await middlewareFn(ctx, async () => {
-            if (nextCalled) throw new Error("next() called multiple times in middleware");
-            nextCalled = true;
-            middlewareCompleted = await this.runMiddlewares(ctx, index + 1);
-        });
-
-        if (!nextCalled && !middlewareCompleted) {
-            return false;
-        }
-
-        return middlewareCompleted;
-    }
-
-    use(fn) {
-        this.middlewares.set(this.middlewares.size, fn);
-    }
-
-    onMessage() {
         try {
-            Object.assign(this.jids, JSON.parse(fs.readFileSync(this.jidsPath).toString()));
+            Object.assign(this.pushNames, JSON.parse(fs.readFileSync(this.pushnamesPath).toString()));
         } catch (error) {
-            fs.writeFileSync(this.jidsPath, JSON.stringify(this.jids));
+            fs.writeFileSync(this.pushnamesPath, JSON.stringify(this.pushNames));
         }
 
         this.core.ev.on("messages.upsert", async (event) => {
             for (const message of event.messages) {
-                if (this.messageIdCache.get(message.key.id)) {
-                    return;
-                }
+                if (this.messageIdCache.get(message.key.id)) return;
                 this.messageIdCache.set(message.key.id, true);
 
-                // Pastikan metadata grup diperbarui sebelum memproses pesan
-                if (Baileys.isJidGroup(message.key.remoteJid)) {
-                    await this.setGroupCache(message.key.remoteJid); // Tunggu pembaruan selesai
-                }
+                if (Baileys.isJidGroup(message.key.remoteJid)) await this.setGroupCache(message.key.remoteJid);
 
                 const messageType = Baileys.getContentType(message.message) ?? "";
                 const text = Functions.getContentFromMsg(message) ?? "";
                 const senderJid = Functions.getSender(message, this.core);
-                const senderLid = await Functions.convertJid(senderJid, "lid", this.jids, this.core);
 
-                if (Baileys.isLidUser(senderLid) && message.pushName && (!this.jids[senderLid] || this.jids[senderLid]?.pushName !== message.pushName)) {
-                    this.jids[senderLid] = {
-                        ...(this.jids[senderLid] || {}),
-                        pushName: message.pushName
-                    };
-                    if (Baileys.isJidUser(senderJid)) this.jids[senderLid].pn = senderJid;
-                    this.saveJids();
+                if (message.pushName && this.pushNames[senderJid] !== message.pushName) {
+                    this.pushNames[senderJid] = message.pushName;
+                    this.savePushnames();
                 }
 
                 const msg = {
                     ...message,
                     content: text,
-                    senderLid,
                     messageType
                 };
 
@@ -171,63 +159,32 @@ class Client {
                 await require("../Handler/Commands.js")(self, this.runMiddlewares.bind(this));
             }
         });
-    }
 
-    onGroupsJoin() {
         this.core.ev.on("groups.upsert", (event) => {
             this.ev.emit(Events.GroupsJoin, event);
         });
-    }
 
-    async setGroupCache(id) {
-        try {
-            const metadata = await this.core.groupMetadata(id);
-            this.groupCache.set(id, metadata);
-        } catch (error) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            try {
-                const metadata = await this.core.groupMetadata(id);
-                this.groupCache.set(id, metadata);
-            } catch (retryError) {
-            }
-        }
-    }
-
-    onGroupsUpdate() {
         this.core.ev.on("groups.update", async ([event]) => {
-            this.groupCache.del(event.id); // Hapus cache lama
             await this.setGroupCache(event.id);
         });
-    }
 
-    onGroupParticipantsUpdate() {
-        this.core.ev.on("group-participants.update", async (event) => {            
-            this.groupCache.del(event.id);
+        this.core.ev.on("group-participants.update", async (event) => {
             await this.setGroupCache(event.id);
+
             if (event.action === "add") {
-                await this.setGroupCache(event.id);
                 return this.ev.emit(Events.UserJoin, event);
             } else if (event.action === "remove") {
                 return this.ev.emit(Events.UserLeave, event);
             }
         });
-    }
 
-    onCall() {
         this.core.ev.on("call", (event) => {
-            const anotherEvent = event.map(async (call) => ({
-                ...call,
-                decodedFrom: Functions.decodeJid(call.from),
-                decodedChatId: Functions.decodeJid(call.chatId),
-                fromLid: await Functions.convertJid(call.from, "lid", this.jids, this.core)
-            }));
-            this.ev.emit(Events.Call, anotherEvent);
+            this.ev.emit(Events.Call, event);
         });
     }
 
     command(opts, code) {
         if (typeof opts !== "string") return this.cmd.set(this.cmd.size, opts);
-
         if (!code) code = () => null;
 
         return this.cmd.set(this.cmd.size, {
@@ -243,33 +200,25 @@ class Client {
         });
     }
 
-    async groups() {
-        return await this.core.groupFetchAllParticipating();
-    }
-
     async bio(content) {
         await this.core.updateProfileStatus(content);
     }
 
     async fetchBio(jid) {
-        const decodedJid = Functions.decodeJid(jid ? jid : this.core.user.id);
+        const decodedJid = Baileys.jidNormalizedUser(jid ? jid : this.core.user.id);
         return await this.core.fetchStatus(decodedJid);
     }
 
     decodeJid(jid) {
-        return Functions.decodeJid(jid);
+        return Baileys.jidNormalizedUser(jid);
     }
 
     getPushname(jid) {
-        return Functions.getPushname(jid, this.jids);
+        return Functions.getPushname(jid, this.pushNames);
     }
 
     getId(jid) {
         return Functions.getId(jid);
-    }
-
-    async convertJid(jid, type) {
-        return await Functions.convertJid(type, jid, this.jids, this.core);
     }
 
     async launch() {
@@ -321,7 +270,7 @@ class Client {
             this.consolefy.setTag("pairing-code");
 
             if (this.printQRInTerminal) {
-                this.consolefy.error("If you are set the usePairingCode to true then you need to set printQRInTerminal to false.");
+                this.consolefy.error("If you are set usePairingCode to true then you need to set printQRInTerminal to false.");
                 this.consolefy.resetTag();
                 return;
             }
@@ -340,28 +289,20 @@ class Client {
                 return;
             }
 
-            const PHONENUMBER_MCC = (await fetch("https://gist.githubusercontent.com/itsreimau/3da60a4937a66e4b1ac34970500e926b/raw/5f4a57faf6d0133c37db60192915d4686e865329/PHONENUMBER_MCC.json")).json();
-            if (!PHONENUMBER_MCC.some(mcc => this.phoneNumber.startsWith(mcc))) {
-                this.consolefy.error("phoneNumber format must be like: 62xxx (starts with the country code).");
+            if (!Baileys.PHONENUMBER_MCC.some(mcc => this.phoneNumber.startsWith(mcc))) {
+                this.consolefy.error("phoneNumber format must be like: 62xxx (starts with country code).");
                 this.consolefy.resetTag();
                 return;
             }
 
             setTimeout(async () => {
                 const code = this.customPairingCode ? await this.core.requestPairingCode(this.phoneNumber, this.customPairingCode) : await this.core.requestPairingCode(this.phoneNumber);
-
                 this.consolefy.info(`Pairing Code: ${code}`);
                 this.consolefy.resetTag();
             }, 3000);
         }
 
-        this.onConnectionUpdate();
-        this.onCredsUpdate();
-        this.onMessage();
-        this.onGroupsJoin();
-        this.onGroupsUpdate();
-        this.onGroupParticipantsUpdate();
-        this.onCall();
+        this.onEvents();
     }
 }
 

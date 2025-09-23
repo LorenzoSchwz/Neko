@@ -32,7 +32,7 @@ class MessageCollector extends Collector {
 
     async _collect(m) {
         const content = Functions.getContentFromMsg(m);
-        if (!content.length || (!this.jid === m.key.remoteJid && !this.hears.includes(m.key.remoteJid))) return null;
+        if (!content || (!this.jid === m.key.remoteJid && !this.hears.includes(m.key.remoteJid))) return null;
 
         try {
             this.received++;
@@ -43,8 +43,7 @@ class MessageCollector extends Collector {
                 message: Baileys.extractMessageContent(m.message),
                 contentType: Functions.getContentType(m.message),
                 id: m.key.remoteJid,
-                senderJid,
-                senderLid: await Functions.convertJid(senderJid, "lid", this.clientReq.self.jids, this.clientReq.self.core)
+                senderJid
             };
         } catch {
             return null;
