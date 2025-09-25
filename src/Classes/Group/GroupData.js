@@ -1,11 +1,16 @@
 "use strict";
 
-const Functions = require("../../Helper/Functions.js");
+const Baileys = require("baileys");
 
 class GroupData {
     constructor(ctx, jid) {
         this.ctx = ctx;
         this.jid = jid;
+        this.fromMe = ctx._msg.key.fromMe;
+    }
+
+    _jidNormalizedUser(jid) {
+        return this.fromMe ? Baileys.jidNormalizedUser(jid) : jid;
     }
 
     async members() {
@@ -54,15 +59,21 @@ class GroupData {
         return await this.getMetadata("owner");
     }
 
+    async isMemberExist(jid) {
+        const members = await this.members();
+        const check = members.some(member => this._jidNormalizedUser(member.id) === this._jidNormalizedUser(jid) || this._jidNormalizedUser(member.lid) === this._jidNormalizedUser(jid));
+        return check;
+    }
+
     async isAdmin(jid) {
         const members = await this.members();
-        const check = members.filter(member => Baileys.jidNormalizedUser(member.jid) === Baileys.jidNormalizedUser(jid) && (member.admin === "admin" || member.admin === "superadmin"));
+        const check = members.filter(member => (this._jidNormalizedUser(member.id) === this._jidNormalizedUser(jid) || this._jidNormalizedUser(member.lid) === this._jidNormalizedUser(jid)) && (member.admin === "admin" || member.admin === "superadmin"));
         return check.length > 0;
     }
 
     async isOwner(jid) {
         const members = await this.members();
-        const check = members.filter(member => Baileys.jidNormalizedUser(member.jid) === Baileys.jidNormalizedUser(jid) && member.admin === "superadmin");
+        const check = members.filter(member => (this._jidNormalizedUser(member.id) === this._jidNormalizedUser(jid) || this._jidNormalizedUser(member.lid) === this._jidNormalizedUser(jid)) && member.admin === "superadmin");
         return check.length > 0;
     }
 

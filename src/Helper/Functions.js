@@ -4,8 +4,7 @@ const Baileys = require("baileys");
 
 const getContentType = (message) => {
     const messageContent = Baileys.extractMessageContent(message);
-    const contentType = Baileys.getContentType(messageContent);
-    return contentType !== "interactiveMessage" ? contentType : Baileys.getContentType(messageContent.interactiveMessage?.header);
+    return Baileys.getContentType(messageContent);
 };
 
 const CONTENT_HANDLERS = {
@@ -40,17 +39,14 @@ const getContentFromMsg = (msg) => {
     return handler ? handler(msg.message) : "";
 };
 
-const getSender = (msg, client) => {
-    const {
-        fromMe,
-        participant,
-        remoteJid
-    } = msg.key;
-    return fromMe ? client.user.id : participant || remoteJid;
+const getSender = (msg, client, address = "lid") => {
+    if (msg.key.fromMe) return address === "lid" ? client.user.lid : client.user.id;
+    if (address === "lid") return msg.key.participant || msg.key.remoteJid;
+    return msg.key.participantAlt || msg.key.remoteJidAlt;
 };
 
-const getPushname = (jid, pushNames = {}) => {
-    const decoded = decodeJid(jid);
+const getPushname = (jid, fromMe, pushNames = {}) => {
+    const decoded = fromMe ? Baileys.jidNormalizedUser(jid) : jid;
     return decoded ? pushNames[decoded] || decoded : null;
 };
 

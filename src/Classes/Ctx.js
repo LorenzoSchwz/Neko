@@ -16,10 +16,22 @@ class Ctx {
         this._sender = {
             jid: Functions.getSender(this._msg, this._client),
             decodedJid: null,
+            pn: Functions.getSender(this._msg, this._client, "pn"),
+            decodedPn: null,
             pushName: this._msg.pushName
         };
 
-        if (this._sender.jid) this._sender.decodedJid = Baileys.jidNormalizedUser(this._sender.jid);
+        if (this._sender.jid && this._msg.key.fromMe) {
+            this._sender.decodedJid = Baileys.jidNormalizedUser(this._sender.jid);
+        } else {
+            this._sender.decodedJid = this._sender.jid;
+        }
+
+        if (this._sender.pn && this._msg.key.fromMe) {
+            this._sender.decodedPn = Baileys.jidNormalizedUser(this._sender.pn);
+        } else {
+            this._sender.decodedJid = this._sender.jid;
+        }
 
         this._config = {
             prefix: this._self.prefix,
@@ -40,7 +52,7 @@ class Ctx {
     }
 
     get decodedId() {
-        return this.id ? Baileys.jidNormalizedUser(this.id) : null;
+        return this.id && this._msg.key.fromMe ? Baileys.jidNormalizedUser(this.id) : this.id;
     }
 
     get sender() {
@@ -48,12 +60,14 @@ class Ctx {
     }
 
     get me() {
-        let user = this._client.user;
-        if (user) {
-            user.decodedId = Baileys.jidNormalizedUser(user.id);
-            user.readyAt = this._self.readyAt;
-        }
-        return user;
+        const user = this._client.user;
+        if (!user) return null;
+        return {
+            ...user,
+            decodedId: Baileys.jidNormalizedUser(user.id),
+            decodedLid: Baileys.jidNormalizedUser(user.lid),
+            readyAt: this._self.readyAt
+        };
     }
 
     get store() {
@@ -68,13 +82,21 @@ class Ctx {
         return this._args;
     }
 
+    get keyDb() {
+        return {
+            user: Functions.getId(this._sender.jid),
+            userPn: Functions.getId(this._sender.pn),
+            group: Functions.getId(this.id)
+        }
+    }
+
     async block(jid) {
-        const target = jid ? Baileys.jidNormalizedUser(jid) : this._sender.decodedJid;
+        const target = jid ? (this._msg.key.fromMe ? Baileys.jidNormalizedUser(jid) : jid) : this._sender.decodedJid;
         return this._client.updateBlockStatus(target, "block");
     }
 
     async unblock(jid) {
-        const target = jid ? Baileys.jidNormalizedUser(jid) : this._sender.decodedJid;
+        const target = jid ? (this._msg.key.fromMe ? Baileys.jidNormalizedUser(jid) : jid) : this._sender.decodedJid;
         return this._client.updateBlockStatus(target, "unblock");
     }
 
@@ -83,7 +105,7 @@ class Ctx {
     }
 
     async fetchBio(jid) {
-        const decodedJid = jid ? Baileys.jidNormalizedUser(jid) : this.me.decodedId;
+        const decodedJid = jid ? (this._msg.key.fromMe ? Baileys.jidNormalizedUser(jid) : jid) : this.me.decodedId;
         return await this._client.fetchStatus(decodedJid);
     }
 
@@ -100,7 +122,7 @@ class Ctx {
     }
 
     isPrivate() {
-        return Baileys.isJidUser(this.id);
+        return Baileys.isJidUser(this.id) || Baileys.isLidUser(this.id);
     }
 
     getMessageType() {
@@ -124,13 +146,12 @@ class Ctx {
     }
 
     getPushname(jid) {
-        return Functions.getPushname(jid || this.sender.jid, this._self.pushNames);
+        return Functions.getPushname(jid || this.sender.jid, this._msg.key.fromMe, this._self.pushNames);
     }
 
     getId(jid) {
         return Functions.getId(jid || this.sender.jid);
     }
-
 
     async getMediaMessage(msg, type) {
         try {
@@ -161,28 +182,31 @@ class Ctx {
         };
     }
 
+    // Does this require taking a PN?
     get quoted() {
         const msgContext = this._msg.message?.[this.getMessageType()]?.contextInfo ?? {};
         if (!msgContext?.quotedMessage) return null;
-        const message = Baileys.extractMessageContent(msgContext.quotedMessage) ?? {};
-        const chatId = msgContext?.remoteJid || this.id;
-        const senderJid = msgContext?.participant || chatId;
+        const quotedMessage = msgContext.quotedMessage;
+        const message = Baileys.extractMessageContent(quotedMessage) ?? {};
+        const chat = msgContext?.remoteJid || this.id;
+        const sender = msgContext?.participant || chat;
+        const fromMe = sender && this.me.decodedId ? Baileys.areJidsSameUser(Baileys.jidNormalizedUser(sender), this.me.decodedId) : false;
 
         return {
             content: Functions.getContentFromMsg({
                 message
             }),
-            message: msgContext.quotedMessage,
-            messageType: Baileys.getContentType(msgContext.quotedMessage) ?? "",
-            contentType: Functions.getContentType(msgContext.quotedMessage),
+            message: quotedMessage,
+            messageType: Baileys.getContentType(quotedMessage) ?? "",
+            contentType: Functions.getContentType(quotedMessage),
             key: {
-                remoteJid: chatId,
-                participant: Baileys.isJidGroup(chatId) ? senderJid : null,
-                fromMe: senderJid && this._client.user.id ? Baileys.areJidsSameUser(Baileys.jidNormalizedUser(senderJid), this.me.decodedId) : false,
+                remoteJid: chat,
+                participant: Baileys.isJidGroup(chat) ? sender : null,
+                fromMe,
                 id: msgContext.stanzaId
             },
-            senderJid,
-            pushName: Functions.getPushname(senderJid, this._self.jid),
+            sender,
+            pushName: Functions.getPushname(sender, fromMe, this._self.pushNames),
             media: {
                 toBuffer: async () => await this.getMediaMessage({
                     message
@@ -289,8 +313,8 @@ class Ctx {
         maxProcessed: 0
     }) {
         return new Promise((resolve, reject) => {
-            const col = this.MessageCollector(args);
-            col.once("end", (collected, reason) => {
+            const collector = this.MessageCollector(args);
+            collector.once("end", (collected, reason) => {
                 if (args.endReason.includes(reason)) {
                     reject(collected);
                 } else {

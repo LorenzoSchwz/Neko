@@ -9,7 +9,6 @@ async function Commands(self, runMiddlewares) {
         prefix,
         m
     } = self;
-
     if (!m.message || Baileys.isJidStatusBroadcast(m.key.remoteJid) || Baileys.isJidNewsletter(m.key.remoteJid)) return;
 
     await handleHears(self, m);
@@ -19,7 +18,6 @@ async function Commands(self, runMiddlewares) {
 async function handleHears(self, m) {
     const hearsEntries = Array.from(self.hearsMap.values());
     const matchingHears = hearsEntries.filter(hear => hear.name === m.content || hear.name === m.messageType || (hear.name instanceof RegExp && hear.name.test(m.content)) || (Array.isArray(hear.name) && hear.name.includes(m.content)));
-
     if (matchingHears.length === 0) return;
 
     const ctx = new Ctx({
@@ -60,19 +58,11 @@ async function processCommands(self, runMiddlewares, m, cmd, prefix) {
     const shouldContinue = await runMiddlewares(ctx);
     if (!shouldContinue) return;
 
-    for (const command of matchedCommands) {
-        await Promise.resolve(command.code(ctx));
-    }
+    await Promise.allSettled(matchedCommands.map(command => Promise.resolve(command.code(ctx))));
 }
 
 function findMatchingPrefix(content, prefix) {
-    if (Array.isArray(prefix)) {
-        if (prefix.includes("")) {
-            const sortedPrefix = [...prefix].sort((a, b) => a === "" ? 1 : b === "" ? -1 : 0);
-            return sortedPrefix.find(_prefix => content.startsWith(_prefix));
-        }
-        return prefix.find(_prefix => content.startsWith(_prefix));
-    }
+    if (Array.isArray(prefix)) return prefix.find(_prefix => content.startsWith(_prefix));
 
     if (prefix instanceof RegExp) {
         const match = content.match(prefix);
