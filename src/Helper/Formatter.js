@@ -1,4 +1,4 @@
-"use strict";
+'use strict';
 
 const bold = (text) => `*${text}*`;
 const italic = (text) => `_${text}_`;
@@ -8,10 +8,10 @@ const monospace = (text) => `\`\`\`${text}\`\`\``;
 const inlineCode = (text) => `\`${text}\``;
 
 module.exports = {
-    bold,
-    italic,
-    strikethrough,
-    quote,
-    monospace,
-    inlineCode
+  bold,
+  italic,
+  strikethrough,
+  quote,
+  monospace,
+  inlineCode,
 };
