@@ -15,7 +15,7 @@ const CONTENT_HANDLERS = {
     documentMessageWithCaption: (msg) => msg.documentMessageWithCaption?.caption || "",
     protocolMessage: (msg) => {
         const editedMessage = msg.protocolMessage?.editedMessage;
-        return editedMessage?.conversation || editedMessage?.extendedTextMessage?.text || editedMessage?.imageMessage?.caption || editedMessage?.videoMessage?.caption || "";
+        return getContentFromMsg(editedMessage) ?? "";
     },
     buttonsMessage: (msg) => msg.buttonsMessage?.contentText || "",
     interactiveMessage: (msg) => msg.interactiveMessage?.body?.text || "",
@@ -39,14 +39,25 @@ const getContentFromMsg = (msg) => {
     return handler ? handler(msg.message) : "";
 };
 
-const getSender = (msg, client, address = "lid") => {
-    if (msg.key.fromMe) return address === "lid" ? client.user.lid : client.user.id;
-    if (address === "lid") return msg.key.participant || msg.key.remoteJid;
-    return msg.key.participantAlt || msg.key.remoteJidAlt;
+const getDb = (collection, jid) => {
+    const decoded = Baileys.jidNormalizedUser(jid);
+    if (Baileys.isJidGroup(decoded)) {
+        return collection.getOrCreate(group => group.jid === decoded, {
+            jid: decoded
+        });
+    } else if (Baileys.isLidUser(decoded)) {
+        return collection.getOrCreate(user => user.jid === decoded, {
+            jid: decoded
+        });
+    } else {
+        return collection.getOrCreate(user => user.alt === decoded, {
+            alt: decoded
+        });
+    }
 };
 
-const getPushname = (jid, fromMe, pushNames = {}) => {
-    const decoded = fromMe ? Baileys.jidNormalizedUser(jid) : jid;
+const getPushname = (jid, pushNames = {}) => {
+    const decoded = Baileys.jidNormalizedUser(jid);
     return decoded ? pushNames[decoded] || decoded : null;
 };
 
@@ -55,7 +66,7 @@ const getId = (jid) => Baileys.jidDecode(jid)?.user || jid;
 module.exports = {
     getContentType,
     getContentFromMsg,
-    getSender,
+    getDb,
     getPushname,
     getId
 };

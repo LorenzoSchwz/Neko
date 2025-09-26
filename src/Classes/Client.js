@@ -33,6 +33,9 @@ class Client {
         this.prefix = opts.prefix;
         this.selfReply = opts.selfReply ?? false;
         this.autoAiLabel = opts.autoAiLabel ?? false;
+        this.databaseDir = opts.databaseDir;
+        this.rawCitation = opts.citation ?? {};
+        this.citation = {};
 
         this.fallbackWAVersion = [2, 3000, 1021387508];
         this.ev = new EventEmitter();
@@ -47,6 +50,7 @@ class Client {
             stdTTL: 30 * 60,
             useClones: false
         });
+        this.linkedParentMap = {};
         this.messageIdCache = new NodeCache({
             stdTTL: 30,
             useClones: false
@@ -58,11 +62,11 @@ class Client {
         if (typeof this.prefix === "string") this.prefix = this.prefix.split("");
     }
 
-    savePushnames() {
+    _savePushnames() {
         fs.writeFileSync(this.pushnamesPath, JSON.stringify(this.pushNames));
     }
 
-    async runMiddlewares(ctx, index = 0) {
+    async _runMiddlewares(ctx, index = 0) {
         const middlewareFn = this.middlewares.get(index);
         if (!middlewareFn) return true;
 
@@ -72,7 +76,7 @@ class Client {
         await middlewareFn(ctx, async () => {
             if (nextCalled) throw new Error("next() called multiple times in middleware");
             nextCalled = true;
-            middlewareCompleted = await this.runMiddlewares(ctx, index + 1);
+            middlewareCompleted = await this._runMiddlewares(ctx, index + 1);
         });
 
         if (!nextCalled && !middlewareCompleted) return false;
@@ -84,15 +88,50 @@ class Client {
         this.middlewares.set(this.middlewares.size, fn);
     }
 
-    async setGroupCache(id) {
+    async _setGroupCache(id) {
         if (!this.groupCache.get(id)) {
             const metadata = await this.core.groupMetadata(id);
             this.groupCache.set(id, metadata);
         }
     }
 
-    onEvents() {
-        this.core.ev.on("connection.update", (update) => {
+    async _resolveCitation() {
+        if (Object.keys(this.rawCitation).length === 0) return;
+
+        const resolvedCitation = {};
+        for (const [citationName, citationList] of Object.entries(this.rawCitation)) {
+            if (!Array.isArray(citationList)) {
+                resolvedCitation[citationName] = citationList;
+                continue;
+            }
+
+            const resolvedList = new Set();
+            for (const citationItem of citationList) {
+                const citationString = String(citationItem);
+                if (citationString.toLowerCase() === "bot") {
+                    resolvedList.add("bot");
+                    continue;
+                }
+
+                const cleanCitation = citationString.replace(/[^0-9]/g, "");
+                if (!cleanCitation) continue;
+                const lidResult = await this.core.getLidUser(cleanCitation + Baileys.S_WHATSAPP_NET);
+                if (lidResult?.[0]) {
+                    resolvedList.add(cleanCitation);
+                    resolvedList.add(Functions.getId(lidResult[0].lid));
+                } else {
+                    resolvedList.add(cleanCitation);
+                }
+            }
+
+            resolvedCitation[citationName] = [...resolvedList];
+        }
+
+        this.citation = resolvedCitation;
+    }
+
+    _onEvents() {
+        this.core.ev.on("connection.update", async (update) => {
             this.ev.emit(Events.ConnectionUpdate, update);
             const {
                 connection,
@@ -106,6 +145,7 @@ class Client {
                 this.consolefy.error(`Connection closed due to ${lastDisconnect.error}, reconnecting ${shouldReconnect}`);
                 if (shouldReconnect) this.launch();
             } else if (connection === "open") {
+                await this._resolveCitation();
                 this.readyAt = Date.now();
                 this.ev.emit(Events.ClientReady, this.core);
             }
@@ -124,15 +164,22 @@ class Client {
                 if (this.messageIdCache.get(message.key.id)) return;
                 this.messageIdCache.set(message.key.id, true);
 
-                if (Baileys.isJidGroup(message.key.remoteJid)) await this.setGroupCache(message.key.remoteJid);
+                if (Baileys.isJidGroup(message.key.remoteJid)) await this._setGroupCache(message.key.remoteJid);
+                
+                if (Baileys.isJidGroup(message.key.remoteJid)) {
+    const communityJid = this.linkedParentMap[message.key.remoteJid];
+    if (communityJid) {
+        msg.communityJid = communityJid;
+    }
+}
 
                 const messageType = Baileys.getContentType(message.message) ?? "";
                 const text = Functions.getContentFromMsg(message) ?? "";
-                const sender = Functions.getSender(message, this.core);
+                const sender = Baileys.jidNormalizedUser(message.key.participant || message.key.remoteJid);
 
                 if (message.pushName && this.pushNames[sender] !== message.pushName) {
                     this.pushNames[sender] = message.pushName;
-                    this.savePushnames();
+                    this._savePushnames();
                 }
 
                 const msg = {
@@ -157,16 +204,16 @@ class Client {
 
                 this.ev.emit(Events.MessagesUpsert, msg, ctx);
                 if (this.readIncomingMsg) await this.core.readMessages([message.key]);
-                await Commands(self, this.runMiddlewares.bind(this));
+                await Commands(self, this._runMiddlewares.bind(this));
             }
         });
 
         this.core.ev.on("groups.update", async ([event]) => {
-            await this.setGroupCache(event.id);
+            await this._setGroupCache(event.id);
         });
 
         this.core.ev.on("group-participants.update", async (event) => {
-            await this.setGroupCache(event.id);
+            await this._setGroupCache(event.id);
 
             if (event.action === "add") {
                 return this.ev.emit(Events.UserJoin, event);
@@ -178,6 +225,30 @@ class Client {
         this.core.ev.on("call", (event) => {
             this.ev.emit(Events.Call, event);
         });
+        
+        this.core.ws.on("CB:iq", (node) => {
+    if (node && node.tag === "iq" && node.attrs.type === "result") {
+        const groups = node.content;
+
+        if (Array.isArray(groups)) {
+            for (const group of groups) {
+                const groupId = group.attrs.id + "@g.us";
+
+                if (group && Array.isArray(group.content)) {
+                    for (const item of group.content) {
+                        if (
+                            item.tag === "linked_parent" &&
+                            item.attrs &&
+                            item.attrs.jid
+                        ) {
+                            this.linkedParentMap[groupId] = item.attrs.jid;
+                        }
+                    }
+                }
+            }
+        }
+    }
+});    
     }
 
     command(opts, code) {
@@ -202,15 +273,62 @@ class Client {
     }
 
     getPushname(jid) {
-        return Functions.getPushname(jid, false, this.pushNames);
+        return Functions.getPushname(jid, this.pushNames);
     }
 
     getId(jid) {
         return Functions.getId(jid);
     }
 
-    db() {
-        return new SimplDB();
+    getDb(collection, jid) {
+        return Functions.getDb(this.db.createCollection(collection), jid);
+    }
+
+    get db() {
+        return new SimplDB({
+            collectionsFolder: this.databaseDir
+        });
+    }
+
+    async _reorganizeUsersCollection() {
+        const users = this.db.createCollection("users");
+        const altUsers = users.getMany(user => user.alt);
+        const lidUsers = users.getMany(user => !user.alt);
+
+        if (altUsers.length === 0) return;
+
+        const lidMap = new Map(lidUsers.map(user => [user.jid, user]));
+        for (const altUser of altUsers) {
+            const lidResult = await this.core.getLidUser(altUser.alt);
+            if (!lidResult?.[0]) continue;
+
+            const lidJid = Baileys.jidNormalizedUser(lidResult[0].lid);
+            const lidUser = lidMap.get(lidJid);
+
+            if (lidUser) {
+                Object.entries(altUser).forEach(([key, value]) => {
+                    if (key === "alt" || key === "jid") return;
+                    if (typeof value === "number" && typeof lidUser[key] === "number") {
+                        lidUser[key] = Math.max(lidUser[key], value);
+                    } else if (lidUser[key] === undefined) {
+                        lidUser[key] = value;
+                    }
+                });
+                users.update(lidUser, user => user.jid === lidJid);
+            } else {
+                const {
+                    alt,
+                    ...newUser
+                } = {
+                    ...altUser,
+                    jid: lidJid
+                };
+                users.create(newUser);
+                lidMap.set(lidJid, newUser);
+            }
+
+            users.remove(user => user.jid === altUser.jid);
+        }
     }
 
     async launch() {
@@ -289,7 +407,8 @@ class Client {
                 return;
             }
 
-            if (!Object.keys(Baileys.PHONENUMBER_MCC).some(mcc => this.phoneNumber.startsWith(mcc))) {
+            const PHONENUMBER_MCC = (await fetch("https://gist.githubusercontent.com/itsreimau/3da60a4937a66e4b1ac34970500e926b/raw/5f4a57faf6d0133c37db60192915d4686e865329/PHONENUMBER_MCC.json")).json();
+            if (!PHONENUMBER_MCC.some(mcc => this.phoneNumber.startsWith(mcc))) {
                 this.consolefy.error("phoneNumber format must be like: 62xxx (starts with country code).");
                 this.consolefy.resetTag();
                 return;
@@ -302,7 +421,13 @@ class Client {
             }, 3000);
         }
 
-        this.onEvents();
+        if (!fs.existsSync(this.databaseDir)) fs.mkdirSync(this.databaseDir, { recursive: true });
+
+        setTimeout(async () => {
+            await this._reorganizeUsersCollection();
+        }, 10000);
+
+        this._onEvents();
     }
 }
 
